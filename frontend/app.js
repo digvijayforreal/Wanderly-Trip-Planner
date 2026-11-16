@@ -38,6 +38,143 @@
   let current = null;        // chat being viewed (may be unsaved if empty)
   let busy = false;
 
+  // ================= Groq usage panel =================
+  // Numbers come from /api/limits (collected from normal Groq calls, so free to read).
+  // Countdowns tick in the browser every second.
+  const usageList = $("usageList");
+  const usageRefresh = $("usageRefresh");
+  let usage = null;        // last snapshot from the server
+  let clockOffset = 0;     // server time − browser time (seconds)
+
+  const nowSec = () => Date.now() / 1000 + clockOffset;
+
+  function fmtLeft(at) {
+    const secs = Math.max(0, Math.round(at - nowSec()));
+    if (secs === 0) return "now";
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  const fmtNum = (n) => (n ?? 0).toLocaleString();
+
+  function usageRow(label, value, extra) {
+    const row = el("div", "usage-row");
+    const left = el("span", "", `${label}: `);
+    left.append(el("b", "", value));
+    row.append(left);
+    if (extra) row.append(el("span", "", extra));
+    return row;
+  }
+
+  function usageBar(left, limit) {
+    const bar = el("div", "usage-bar");
+    const fill = el("span");
+    const pct = limit ? Math.max(0, Math.min(100, (left / limit) * 100)) : 0;
+    fill.style.width = `${pct}%`;
+    if (pct < 15) fill.classList.add("low");
+    bar.append(fill);
+    return bar;
+  }
+
+  function renderUsage() {
+    if (!usage) return;
+    usageList.replaceChildren();
+    const now = nowSec();
+
+    usage.models.forEach((m) => {
+      const box = el("div", "usage-model");
+      const name = el("div", "usage-name");
+      name.append(el("span", "", m.model.replace(/^[^/]+\//, "")));
+
+      const blocked = m.daily_blocked_until && m.daily_blocked_until > now;
+      const badge = el("span", "usage-badge",
+        blocked ? "Limit hit" : m.updated_at ? "OK" : "Not used yet");
+      if (blocked) badge.classList.add("blocked");
+      else if (!m.updated_at) badge.classList.add("idle");
+      name.append(badge);
+      box.append(name);
+
+      if (blocked) {
+        box.append(usageRow("Daily tokens", "used up", `back in ${fmtLeft(m.daily_blocked_until)}`));
+      }
+      if (m.requests_limit != null) {
+        // Values age once their reset time passes, so show them as refilled.
+        const reqLeft = m.requests_reset_at && m.requests_reset_at <= now ? m.requests_limit : m.requests_left;
+        box.append(usageRow("Requests/day", `${fmtNum(reqLeft)} / ${fmtNum(m.requests_limit)}`,
+          reqLeft < m.requests_limit && m.requests_reset_at ? `full in ${fmtLeft(m.requests_reset_at)}` : "full"));
+        box.append(usageBar(reqLeft, m.requests_limit));
+      }
+      if (m.tpm_limit != null) {
+        const tokLeft = m.tpm_reset_at && m.tpm_reset_at <= now ? m.tpm_limit : m.tpm_left;
+        box.append(usageRow("Tokens/min", `${fmtNum(tokLeft)} / ${fmtNum(m.tpm_limit)}`,
+          tokLeft < m.tpm_limit && m.tpm_reset_at ? `full in ${fmtLeft(m.tpm_reset_at)}` : "full"));
+        box.append(usageBar(tokLeft, m.tpm_limit));
+      }
+      if (m.daily_tokens_limit) {
+        box.append(usageRow("Daily tokens (last seen)",
+          `${fmtNum(m.daily_tokens_used)} / ${fmtNum(m.daily_tokens_limit)}`));
+      }
+      if (m.updated_at) {
+        box.append(usageRow("This session", `${fmtNum(m.session_tokens)} tokens`, `${m.session_calls} calls`));
+      }
+      usageList.append(box);
+    });
+  }
+
+  async function loadUsage(refresh = false) {
+    try {
+      if (refresh) usageRefresh.classList.add("spin");
+      const res = await fetch(refresh ? "/api/limits/refresh" : "/api/limits", { method: refresh ? "POST" : "GET" });
+      if (!res.ok) return;
+      usage = await res.json();
+      clockOffset = usage.now - Date.now() / 1000;
+      renderUsage();
+    } catch { /* server offline: keep the last numbers */ }
+    finally { usageRefresh.classList.remove("spin"); }
+  }
+
+  usageRefresh.addEventListener("click", (e) => {
+    e.preventDefault(); // don't collapse the panel
+    if (!busy) loadUsage(true);
+  });
+  setInterval(renderUsage, 1000);                       // tick countdowns
+  setInterval(() => { if (!document.hidden) loadUsage(); }, 15000);
+  loadUsage();
+
+  // ================= Mode switch (Groq cloud / local Ollama) =================
+  const MODE_KEY = "wanderly.mode";
+  const modeSwitch = $("modeSwitch");
+  const modeButtons = [...modeSwitch.querySelectorAll("button[data-mode]")];
+  let modeLabels = { groq: "Groq · cloud", local: "Local" };
+  let mode = localStorage.getItem(MODE_KEY) === "local" ? "local" : "groq";
+
+  function setMode(next) {
+    mode = next;
+    try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ }
+    modeButtons.forEach((btn) => {
+      const on = btn.dataset.mode === mode;
+      btn.setAttribute("aria-checked", String(on));
+      btn.tabIndex = on ? 0 : -1;
+      btn.title = modeLabels[btn.dataset.mode];
+    });
+  }
+
+  modeButtons.forEach((btn) => btn.addEventListener("click", () => { if (!busy) setMode(btn.dataset.mode); }));
+  modeSwitch.addEventListener("keydown", (e) => { // arrow keys move between options (radiogroup pattern)
+    if (busy || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    e.preventDefault();
+    const next = mode === "groq" ? "local" : "groq";
+    setMode(next);
+    modeButtons.find((b) => b.dataset.mode === next).focus();
+  });
+
+  // Server tells us the exact local model name (e.g. "Local · hermes3:3b").
+  fetch("/api/modes").then((r) => r.json()).then((data) => {
+    modeLabels = { ...modeLabels, ...data.modes };
+    setMode(mode);
+  }).catch(() => {});
+  setMode(mode);
+
   function newChat() {
     const now = Date.now();
     // The id doubles as the LangGraph thread_id, so each chat keeps its own memory.
@@ -241,6 +378,8 @@
       md.append(renderMarkdown(m.text));
       content.append(md);
       if (m.plan) content.append(makeActions(m.text));
+      // Shows which mode wrote this answer, handy when comparing Groq vs local.
+      if (m.mode) content.append(el("span", "mode-tag", m.mode === "local" ? "💻 Local" : "☁️ Groq"));
     }
     els.messages.append(row);
   }
@@ -353,6 +492,7 @@
       document.title = `${chat.title} · Wanderly`;
     }
 
+    const runMode = mode; // locked for this request, even if the switch changes later
     addToChat(chat, { role: "user", text: message });
     setBusy(true);
     const progress = addProgress(chat);
@@ -363,7 +503,7 @@
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: chat.id }),
+        body: JSON.stringify({ message, session_id: chat.id, mode: runMode }),
       });
       if (!response.ok) {
         throw new Error(response.status === 422
@@ -381,10 +521,11 @@
 
     const steps = progress.finish();
     if (errorText) addToChat(chat, { role: "error", text: errorText });
-    else if (finalText) addToChat(chat, { role: "bot", text: finalText, plan: steps.length > 1, steps });
+    else if (finalText) addToChat(chat, { role: "bot", text: finalText, plan: steps.length > 1, steps, mode: runMode });
     else addToChat(chat, { role: "error", text: "No response received. Please try again." });
 
     setBusy(false);
+    loadUsage(); // numbers changed during the run
     if (!els.chatApp.hidden) els.input.focus();
   }
 
@@ -393,6 +534,7 @@
     busy = value;
     els.sendBtn.disabled = value;
     els.newChatBtn.disabled = value;
+    modeButtons.forEach((btn) => (btn.disabled = value));
     els.statusDot.classList.toggle("busy", value);
     els.statusText.textContent = value ? "Planning…" : "Online";
   }

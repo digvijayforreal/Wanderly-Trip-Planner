@@ -26,6 +26,15 @@ MODELS = {
 # for the supervisor when gpt-oss-120b hits its daily limit.
 FALLBACK_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 
+# ---------- Modes ----------
+# "groq"  = cloud models above.  "local" = every agent uses the local Ollama model below.
+MODES        = ("groq", "local")
+DEFAULT_MODE = "groq"
+
+LOCAL_MODEL          = os.getenv("OLLAMA_MODEL", "hermes3:3b")            # must match `ollama list`
+OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+LOCAL_CONTEXT_WINDOW = 8192   # tokens; our prompts are long, Ollama's default is too small
+
 MAX_REVISIONS       = 2        #rework attempts per worker before the supervisor accepts
 MAX_API_RETRIES     = 3        #Groq client retries (with backoff) on rate limits / network errors
 # No step limit. LangGraph needs a number (its default of 25 would cut runs short),

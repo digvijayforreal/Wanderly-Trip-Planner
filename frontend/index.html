@@ -62,6 +62,16 @@
       <p class="side-label">History</p>
       <nav class="history" id="historyList" aria-label="Chat history"></nav>
 
+      <!-- Groq usage: requests/tokens left and time until reset -->
+      <details class="usage" id="usagePanel" open>
+        <summary>
+          <span>⚡ Groq usage</span>
+          <button class="usage-refresh" id="usageRefresh" type="button" title="Check now (uses a few tokens)">↻</button>
+        </summary>
+        <div id="usageList" aria-live="polite"></div>
+        <p class="usage-note">Daily token limit shows after Groq reports it (when it's hit).</p>
+      </details>
+
       <div class="sidebar-foot">Chats are saved in this browser</div>
     </aside>
 
@@ -71,6 +81,11 @@
       <header class="topbar">
         <button class="icon-btn only-mobile" id="openSidebarBtn" type="button" aria-label="Open sidebar">☰</button>
         <h1 class="chat-title" id="chatTitle">New trip</h1>
+        <!-- Model switch: Groq cloud vs local Ollama (hermes3) -->
+        <div class="mode-switch" id="modeSwitch" role="radiogroup" aria-label="Model mode">
+          <button type="button" role="radio" data-mode="groq" aria-checked="true">☁️ <span>Groq</span></button>
+          <button type="button" role="radio" data-mode="local" aria-checked="false">💻 <span>Local</span></button>
+        </div>
         <span class="status"><span class="dot" id="statusDot"></span><span id="statusText">Online</span></span>
       </header>
 

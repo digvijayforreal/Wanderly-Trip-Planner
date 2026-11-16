@@ -4,16 +4,17 @@ questions itself: the final answer is built only from the workers' approved work
 from datetime import date
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 
 from app.config import CURRENCY_SYMBOL, HISTORY_WINDOW, MAX_REVISIONS
-from app.llms import get_llm, get_structured_llm
+from app.llms import get_llm, get_structured_llm, mode_from
 from app.prompts import (
     FINAL_PROMPT, INTAKE_PROMPT, REVIEW_CHECKLISTS, REVIEW_INPUT, REVIEW_PROMPT,
     SECTION_FORMATS, SUPERVISOR_INPUT, SUPERVISOR_PROMPT,
 )
 from app.schemas import Decision, Review, TripDetails
 from app.state import OUTPUT_KEY, REQUIRED_FIELDS, STEP_TITLES, WORKERS, TripState
-from app.utils import clean_text, format_trip, latest_user_message
+from app.utils import clean_text, format_trip, latest_user_message, looks_like_an_answer, quick_extract
 
 # How to ask for each trip detail when it is missing.
 FIELD_QUESTIONS = {
@@ -46,10 +47,10 @@ def _transcript(messages) -> str:
 
 
 # ---------- Node: intake ----------
-def intake_node(state: TripState) -> dict:
+def intake_node(state: TripState, config: RunnableConfig) -> dict:
     """Extract trip details and reset per-message fields.
     Worker drafts are kept so follow-ups can reuse them, unless the destination changed."""
-    llm = get_structured_llm("supervisor", TripDetails)
+    llm = get_structured_llm("supervisor", TripDetails, mode_from(config))
     details = llm.invoke([
         SystemMessage(content=INTAKE_PROMPT.format(today=date.today().isoformat())),
         HumanMessage(content=_transcript(state["messages"])),
@@ -64,6 +65,11 @@ def intake_node(state: TripState) -> dict:
     new_dest = (extracted.get("destination") or "").strip().lower()
     same_trip = not new_dest or not old_dest or new_dest == old_dest
     trip = {k: (v if v not in (None, "", []) else previous.get(k)) for k, v in extracted.items()} if same_trip else extracted
+
+    # Rule-based backup for details small models often miss ("3 days and only me").
+    for key, value in quick_extract(latest_user_message(state["messages"])).items():
+        if not trip.get(key):
+            trip[key] = value
 
     update = {
         "trip": trip,
@@ -103,12 +109,27 @@ def _ask_for(missing: list[str]) -> str:
     return "Happy to help with that. I just need to know " + ", ".join(asks) + "."
 
 
-def supervisor_node(state: TripState) -> dict:
+def _safe_question(message: str | None, trip: dict, missing: list[str] | None = None) -> str:
+    """The supervisor may only ASK, never answer. If its message contains prices or a long
+    answer (small models do this), replace it with a question built in code."""
+    if message and not looks_like_an_answer(message):
+        return message
+    if missing:
+        return _ask_for(missing)
+    if trip.get("destination"):
+        # Travel request: ask for what a budget/itinerary would need.
+        gaps = [f for f in ("days", "travelers") if not trip.get(f)]
+        if gaps:
+            return _ask_for(gaps)
+    return OFF_TOPIC_REPLY
+
+
+def supervisor_node(state: TripState, config: RunnableConfig) -> dict:
     """Pick the ONE next step: a worker, ask_user or finalize. Called again after every approved step."""
     trip = state.get("trip") or {}
     done = state.get("done") or []
 
-    llm = get_structured_llm("supervisor", Decision)
+    llm = get_structured_llm("supervisor", Decision, mode_from(config))
     decision = llm.invoke([
         SystemMessage(content=SUPERVISOR_PROMPT),
         HumanMessage(content=SUPERVISOR_INPUT.format(
@@ -135,11 +156,11 @@ def supervisor_node(state: TripState) -> dict:
         # Guard: required details are checked in code, not trusted to the LLM.
         missing = missing_fields(choice, trip)
         if missing:
-            return {"next_step": "ask_user", "ask_message": decision.message_to_user or _ask_for(missing)}
+            return {"next_step": "ask_user", "ask_message": _safe_question(decision.message_to_user, trip, missing)}
         return {"next_step": choice, "decision_reason": decision.reason}
 
     if choice == "ask_user":
-        return {"next_step": "ask_user", "ask_message": decision.message_to_user or OFF_TOPIC_REPLY}
+        return {"next_step": "ask_user", "ask_message": _safe_question(decision.message_to_user, trip)}
 
     # "finish": first, never leave a stale budget. If the itinerary changed this turn,
     # an earlier budget no longer matches it, so re-price it.
@@ -149,7 +170,7 @@ def supervisor_node(state: TripState) -> dict:
     # The answer must come from team work, never from the supervisor alone.
     has_work = any(state.get(key) for key in OUTPUT_KEY.values())
     if not done and not has_work:
-        return {"next_step": "ask_user", "ask_message": decision.message_to_user or OFF_TOPIC_REPLY}
+        return {"next_step": "ask_user", "ask_message": _safe_question(decision.message_to_user, trip)}
     return {"next_step": "finalize", "decision_reason": decision.reason}
 
 
@@ -160,11 +181,11 @@ def ask_user_node(state: TripState) -> dict:
 
 
 # ---------- Node: review a worker's output ----------
-def review_node(state: TripState) -> dict:
+def review_node(state: TripState, config: RunnableConfig) -> dict:
     step = state["current_step"]
     has_itinerary = bool(state.get("itinerary"))
 
-    llm = get_structured_llm("supervisor", Review)
+    llm = get_structured_llm("supervisor", Review, mode_from(config))
     review = llm.invoke([
         SystemMessage(content=REVIEW_PROMPT),
         HumanMessage(content=REVIEW_INPUT.format(
@@ -215,7 +236,7 @@ def review_node(state: TripState) -> dict:
 
 
 # ---------- Node: write the final answer ----------
-def finalize_node(state: TripState) -> dict:
+def finalize_node(state: TripState, config: RunnableConfig) -> dict:
     """Turn the team's work into one polished Markdown answer (no new facts from the supervisor)."""
     done = state.get("done") or []
     notes = state.get("review_notes") or []
@@ -237,7 +258,7 @@ def finalize_node(state: TripState) -> dict:
         f"# Heads-up notes\n{notes_text}",
     ])
 
-    result = get_llm("supervisor").invoke([
+    result = get_llm("supervisor", mode_from(config)).invoke([
         SystemMessage(content=FINAL_PROMPT.format(sections=sections)),
         HumanMessage(content=material),
     ])

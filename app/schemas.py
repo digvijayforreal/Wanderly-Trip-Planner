@@ -47,3 +47,4 @@ class ChatRequest(BaseModel):
     """Body of POST /api/chat."""
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
     session_id: str = Field(pattern=r"^[A-Za-z0-9-]{8,64}$")
+    mode: Literal["groq", "local"] = Field("groq", description="'groq' = cloud models, 'local' = Ollama model.")

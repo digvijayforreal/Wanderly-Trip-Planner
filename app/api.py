@@ -8,7 +8,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 
-from app.config import RECURSION_LIMIT
+from app import limits
+from app.config import DEFAULT_MODE, FALLBACK_MODELS, GROQ_API_KEY, LOCAL_MODEL, MODELS, RECURSION_LIMIT
 from app.graph import graph
 from app.schemas import ChatRequest
 from app.state import STEP_TITLES
@@ -49,8 +50,9 @@ def describe(node: str, update: dict):
     text = NODE_STATUS.get(node)
     return (text, "done") if text else None
 
-def event_stream(message: str, session_id: str):
-    config = {"configurable": {"thread_id": session_id}, "recursion_limit": RECURSION_LIMIT}
+def event_stream(message: str, session_id: str, mode: str):
+    # "mode" is read by every node (llms.mode_from) to pick Groq or the local Ollama model.
+    config = {"configurable": {"thread_id": session_id, "mode": mode}, "recursion_limit": RECURSION_LIMIT}
     try:
         for chunk in graph.stream({"messages": [HumanMessage(content=message)]}, config, stream_mode="updates"):
             for node, update in chunk.items():
@@ -60,10 +62,47 @@ def event_stream(message: str, session_id: str):
 
         final = graph.get_state(config).values.get("final_answer", "")
         yield json.dumps({"type": "final", "text": final}) + "\n"
-    except Exception:
+    except Exception as exc:
         # Log details on the server; never send stack traces to the browser.
-        logger.exception("Graph run failed")
-        yield json.dumps({"type": "error", "text": "Something went wrong while planning. Please try again."}) + "\n"
+        logger.exception("Graph run failed (mode=%s)", mode)
+        yield json.dumps({"type": "error", "text": friendly_error(exc, mode)}) + "\n"
+
+
+def friendly_error(exc: Exception, mode: str) -> str:
+    """Short, useful error text for the UI (no internals)."""
+    text = str(exc).lower()
+    if mode == "local" and ("connect" in text or "refused" in text):
+        return f"Can't reach the local model. Is Ollama running with `{LOCAL_MODEL}`? (ollama run {LOCAL_MODEL})"
+    if mode == "local" and "not found" in text:
+        return f"Model `{LOCAL_MODEL}` isn't installed. Run: ollama pull {LOCAL_MODEL}"
+    if "rate limit" in text or "429" in text:
+        return "Groq's free limit is used up for now. Try again later, or switch to Local mode."
+    return "Something went wrong while planning. Please try again."
+
+
+def groq_models() -> list[str]:
+    """Every Groq model the app can call (main models + fallbacks), in a stable order."""
+    names = [cfg["model"] for cfg in MODELS.values()] + list(FALLBACK_MODELS)
+    return list(dict.fromkeys(names))
+
+
+@app.get("/api/limits")
+def get_limits():
+    """Latest Groq usage numbers, collected from normal calls (no API cost)."""
+    return limits.snapshot(groq_models())
+
+
+@app.post("/api/limits/refresh")
+def refresh_limits():
+    """Probe each model with a 1-token request for fresh numbers (costs a few tokens)."""
+    limits.probe(groq_models(), GROQ_API_KEY)
+    return limits.snapshot(groq_models())
+
+
+@app.get("/api/modes")
+def modes():
+    """Labels for the mode switch in the UI."""
+    return {"default": DEFAULT_MODE, "modes": {"groq": "Groq · cloud", "local": f"Local · {LOCAL_MODEL}"}}
 
 @app.get("/")
 def index():
@@ -71,4 +110,5 @@ def index():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    return StreamingResponse(event_stream(req.message.strip(), req.session_id), media_type="application/x-ndjson")
+    return StreamingResponse(event_stream(req.message.strip(), req.session_id, req.mode),
+                             media_type="application/x-ndjson")

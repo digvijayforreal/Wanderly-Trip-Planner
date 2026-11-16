@@ -22,6 +22,34 @@ def clean_text(content) -> str:
         content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
     return _THINK_TAGS.sub("", content or "").strip()
 
+_DAYS = re.compile(r"\b(\d{1,2})\s*(?:-\s*)?(?:days?|nights?|din)\b", re.IGNORECASE)
+_PEOPLE = re.compile(r"\b(\d{1,2})\s*(?:people|persons?|pax|travell?ers?|adults?|friends|members)\b", re.IGNORECASE)
+_SOLO = re.compile(r"\b(only me|just me|myself|solo|alone|1 person)\b", re.IGNORECASE)
+_COUPLE = re.compile(r"\b(couple|me and my (?:wife|husband|partner|girlfriend|boyfriend))\b", re.IGNORECASE)
+_MONEY = re.compile(r"[₹$]\s*\d|\b(?:rs\.?|inr)\s*\d|\b\d[\d,]*\s*(?:k|rs|rupees|inr|lakh)\b", re.IGNORECASE)
+
+
+def quick_extract(text: str) -> dict:
+    """Rule-based backup for days/travelers, for when a small model misses them
+    (e.g. '3 days and only me'). Only fills gaps; the LLM's values win."""
+    found = {}
+    if m := _DAYS.search(text):
+        found["days"] = int(m.group(1))
+    if m := _PEOPLE.search(text):
+        found["travelers"] = int(m.group(1))
+    elif _SOLO.search(text):
+        found["travelers"] = 1
+    elif _COUPLE.search(text):
+        found["travelers"] = 2
+    return found
+
+
+def looks_like_an_answer(text: str) -> bool:
+    """True if a 'question to the user' actually contains prices or a long answer.
+    The supervisor must not answer itself, so such text is replaced in code."""
+    return bool(_MONEY.search(text or "")) or len(text or "") > 400
+
+
 def latest_user_message(messages) -> str:
     """Text of the most recent user message."""
     for m in reversed(messages or []):

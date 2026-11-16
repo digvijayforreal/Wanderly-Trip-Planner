@@ -1,7 +1,9 @@
 """The four worker agents. One factory builds them all, since they share the same shape."""
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.llms import get_llm
+from langchain_core.runnables import RunnableConfig
+
+from app.llms import get_llm, mode_from
 from app.prompts import WORKER_PROMPTS
 from app.state import OUTPUT_KEY, TripState
 from app.utils import clean_text, format_trip, latest_user_message
@@ -20,7 +22,7 @@ def make_worker(step: str):
     """Build a graph node function for one worker."""
     output_key = OUTPUT_KEY[step]
 
-    def worker_node(state: TripState) -> dict:
+    def worker_node(state: TripState, config: RunnableConfig) -> dict:
         parts = [
             f"## User's latest request\n{latest_user_message(state['messages'])}",
             f"## Trip details\n{format_trip(state['trip'])}",
@@ -39,7 +41,7 @@ def make_worker(step: str):
             # Follow-up: an earlier version exists, edit it if the user asked for a change.
             parts.append(f"## Your earlier version (edit it if the user asked for a change, otherwise redo it)\n{previous}")
 
-        result = get_llm(step).invoke([
+        result = get_llm(step, mode_from(config)).invoke([
             SystemMessage(content=WORKER_PROMPTS[step]),
             HumanMessage(content="\n\n".join(parts)),
         ])
