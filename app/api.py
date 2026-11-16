@@ -26,17 +26,24 @@ NODE_STATUS = {
     "itinerary_builder": "Itinerary builder planned each day",
     "budget_planner": "Budget planner priced the trip",
     "packing_expert": "Packing expert made your checklist",
-    "finalize": "Supervisor wrote your final plan",
+    "finalize": "Supervisor wrote your answer",
 }
 
 def describe(node: str, update: dict):
     """Turn a node update into (text, kind) for the UI, or None to skip."""
+    if node == "supervisor":
+        nxt = update.get("next_step", "")
+        if nxt not in STEP_TITLES:
+            return None  # ask_user / finalize are shown by their own nodes
+        reason = update.get("decision_reason", "").strip().rstrip(".")
+        text = f"Supervisor assigned: {STEP_TITLES[nxt]}"
+        return (f"{text} ({reason})" if reason else text), "plan"
     if node == "review":
         step = update.get("current_step", "")
         title = STEP_TITLES.get(step, "work").lower()
         if update.get("approved"):
             return f"Supervisor approved the {title}", "done"
-        if update.get("feedback_for") and update.get("feedback_for") != step:
+        if update.get("feedback_for") == "itinerary_builder" and step == "budget_planner":
             return "Supervisor found the budget too high, asking for a cheaper itinerary", "rework"
         return f"Supervisor sent the {title} back for rework", "rework"
     text = NODE_STATUS.get(node)

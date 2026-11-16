@@ -65,6 +65,11 @@
     return new Date(ts).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
   }
 
+  // Progress line style: ✓ done, ↻ rework, → supervisor assigned an agent.
+  function stepClass(kind) {
+    return ["rework", "plan"].includes(kind) ? kind : "done";
+  }
+
   function scrollToBottom() {
     els.thread.scrollTop = els.thread.scrollHeight;
   }
@@ -244,7 +249,7 @@
     const details = el("details", "trace");
     details.append(el("summary", "", `🔍 How this plan was made · ${steps.length} steps`));
     const list = el("ul", "progress");
-    steps.forEach(({ text, kind }) => list.append(el("li", kind === "rework" ? "rework" : "done", text)));
+    steps.forEach(({ text, kind }) => list.append(el("li", stepClass(kind), text)));
     details.append(list);
     return details;
   }
@@ -288,7 +293,7 @@
     const steps = [];
     return {
       add(text, kind) {
-        list.insertBefore(el("li", kind === "rework" ? "rework" : "done", text), active);
+        list.insertBefore(el("li", stepClass(kind), text), active);
         steps.push({ text, kind });
         active.textContent = "Team is working…";
         if (current === chat) scrollToBottom();

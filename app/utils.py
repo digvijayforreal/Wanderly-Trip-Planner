@@ -22,6 +22,14 @@ def clean_text(content) -> str:
         content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
     return _THINK_TAGS.sub("", content or "").strip()
 
+def latest_user_message(messages) -> str:
+    """Text of the most recent user message."""
+    for m in reversed(messages or []):
+        if m.type == "human":
+            return clean_text(m.content)
+    return ""
+
+
 def format_trip(trip: dict) -> str:
     """Trip details as a readable bullet list for prompts."""
     lines = []
@@ -34,4 +42,4 @@ def format_trip(trip: dict) -> str:
         if key == "budget":
             value = f"{CURRENCY_SYMBOL}{float(value):,.0f} total for the group"
         lines.append(f"- {label}: {value}")
-    return "\n".join(lines)
+    return "\n".join(lines) or "- (no details given yet)"

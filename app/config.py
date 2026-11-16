@@ -1,5 +1,6 @@
 """ All settings in one place. Change models or Limits here, not in agent code. """
 import os
+import sys
 
 from dotenv import load_dotenv
 
@@ -10,7 +11,7 @@ if not GROQ_API_KEY:
     raise RuntimeError("GROQ KEY MISSING")
 
 #Each graph node gets its own model and temperature.
-# Keys must match the node names in the state.STEPS (plus "supervisor").
+# Keys must match the node names in state.WORKERS (plus "supervisor").
 
 MODELS = {
     "supervisor":            {"model":"openai/gpt-oss-120b","temperature": 0.0},  # strict reviewer
@@ -21,10 +22,16 @@ MODELS = {
 }
 
 #Used automatically if the main model errors out (rate limit, outage).
-FALLBACK_MODEL = "qwen/qwen3.8-27b"
+# Tried in order. Each model has its own rate limit, so gpt-oss-20b is a strong backup
+# for the supervisor when gpt-oss-120b hits its daily limit.
+FALLBACK_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 
 MAX_REVISIONS       = 2        #rework attempts per worker before the supervisor accepts
-RECURSION_LIMIT     = 60       #hard cap on graph steps per request
+MAX_API_RETRIES     = 3        #Groq client retries (with backoff) on rate limits / network errors
+# No step limit. LangGraph needs a number (its default of 25 would cut runs short),
+# so we pass the largest one. Loops are prevented in code instead: a worker approved
+# this turn can't be called again, and each worker has MAX_REVISIONS reworks.
+RECURSION_LIMIT     = sys.maxsize
 HISTORY_WINDOW      = 10       #how manys past chat messages the supervisor reads
 MAX_MESSAGE_LENGTH  = 2000     # max characters per user message
 
